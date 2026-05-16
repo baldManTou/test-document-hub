@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文档中心</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background: #f5f7fb; }
+        .doc-card { transition: 0.2s; margin-bottom: 1rem; }
+        .doc-card:hover { transform: translateY(-3px); box-shadow: 0 0.5rem 1rem rgba(0,0,0,0.1); }
+        .user-bar { background: white; border-radius: 2rem; padding: 0.5rem 1rem; box-shadow: 0 0.1rem 0.5rem rgba(0,0,0,0.05); }
+    </style>
+</head>
+<body class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1 class="h3 mb-0">📚 文档托管站</h1>
+        <div id="userInfo" class="user-bar">
+            <span class="me-2">加载中...</span>
+        </div>
+    </div>
+
+    <div class="row" id="documentsList">
+        <div class="col-12 text-center">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">加载中...</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script>
+        const SUPABASE_URL = 'https://gwfsyslvhhkbnwjauofa.supabase.co';
+        const SUPABASE_ANON_KEY = 'sb_publishable_SWUdJhjmT05kCxheci3sNw_2H3qxIfl';
+        const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+        let currentUser = null;
+        let currentRole = null;
+
+        async function loadUserInfo() {
+            const userInfoDiv = document.getElementById('userInfo');
+            // 关键：先尝试从 localStorage 恢复会话
+            await supabaseClient.auth.getSession();
+            const { data: { user }, error } = await supabaseClient.auth.getUser();
+            if (error) console.error('getUser error:', error);
+            currentUser = user;
+            console.log('Current user after getSession:', currentUser);
+            
+            if (!currentUser) {
+                userInfoDiv.innerHTML = `<a href="login.html" class="btn btn-sm btn-outline-primary">登录 / 注册</a>`;
+                return;
+            }
+            // 查询角色
+            const { data: profile, error: profileError } = await supabaseClient
+                .from('profiles')
+                .select('role')
+                .eq('id', currentUser.id)
+                .single();
+            if (profileError) console.error('profile error:', profileError);
+            currentRole = profile?.role || 'reader';
+            
+            let roleText = currentRole === 'admin' ? '👑 管理员' : '📖 普通用户';
+            let adminLink = (currentRole === 'admin') ? '<a href="admin.html" class="btn btn-sm btn-outline-warning me-2">⚙️ 管理面板</a>' : '';
+            userInfoDiv.innerHTML = `
+                <span class="me-2">${escapeHtml(currentUser.email)}</span>
+                <span class="badge bg-secondary me-2">${roleText}</span>
+                ${adminLink}
+                <button id="logoutBtn" class="btn btn-sm btn-danger">退出</button>
+            `;
+            document.getElementById('logoutBtn')?.addEventListener('click', async () => {
+                await supabaseClient.auth.signOut();
+                window.location.reload();
+            });
+        }
+
+        async function loadDocuments() {
+            const container = document.getElementById('documentsList');
+            const { data, error } = await supabaseClient
+                .from('documents')
+                .select('id, title, content, slug')
+                .eq('status', 'published')
+                .order('created_at', { ascending: false });
+
+            if (error) {
+                container.innerHTML = `<div class="alert alert-danger">加载失败: ${error.message}</div>`;
+                return;
+            }
+            if (!data || data.length === 0) {
+                container.innerHTML = `<div class="alert alert-info">暂无文档，请先在数据库里插入几条测试数据。</div>`;
+                return;
+            }
+
+            let html = '';
+            for (let doc of data) {
+                let summary = doc.content ? doc.content.substring(0, 150) : '无内容';
+                if (doc.content && doc.content.length > 150) summary += '...';
+                html += `
+                    <div class="col-md-6 col-lg-4">
+                        <div class="card doc-card h-100">
+                            <div class="card-body">
+                                <h5 class="card-title">${escapeHtml(doc.title)}</h5>
+                                <p class="card-text text-muted">${escapeHtml(summary)}</p>
+                                <a href="doc.html?id=${doc.id}" class="btn btn-sm btn-outline-primary">阅读全文 →</a>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            container.innerHTML = html;
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/[&<>]/g, function(m) {
+                if (m === '&') return '&amp;';
+                if (m === '<') return '&lt;';
+                if (m === '>') return '&gt;';
+                return m;
+            });
+        }
+
+        async function init() {
+            await loadUserInfo();
+            await loadDocuments();
+        }
+        init();
+    </script>
+</body>
+</html>

@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>管理面板 - 文档修改审批</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background: #f5f7fb; }
+        .request-card { background: white; border-radius: 1rem; margin-bottom: 1.5rem; padding: 1.5rem; box-shadow: 0 0.1rem 0.5rem rgba(0,0,0,0.05); }
+        .diff-view { background: #f8f9fa; border-left: 4px solid #ffc107; padding: 0.75rem; margin-top: 0.5rem; font-family: monospace; white-space: pre-wrap; }
+    </style>
+</head>
+<body class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1>⚙️ 文档修改审批</h1>
+        <a href="index.html" class="btn btn-outline-secondary">← 返回首页</a>
+    </div>
+
+    <div id="adminCheck" class="alert alert-warning" style="display: none;"></div>
+    <div id="loadingSpinner" class="text-center py-5">
+        <div class="spinner-border text-primary" role="status"><span class="visually-hidden">加载中...</span></div>
+    </div>
+    <div id="requestsContainer" style="display: none;"></div>
+
+    <!-- 预览模态框 -->
+    <div class="modal fade" id="previewModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header"><h5 class="modal-title">申请内容预览 (Markdown)</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body" id="previewContent"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+        // Supabase 配置
+        const SUPABASE_URL = 'https://gwfsyslvhhkbnwjauofa.supabase.co';
+        const SUPABASE_ANON_KEY = 'sb_publishable_SWUdJhjmT05kCxheci3sNw_2H3qxIfl';
+        const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+        let currentUser = null;
+
+        // 检查管理员权限
+        async function checkAdmin() {
+            const { data: { user } } = await supabaseClient.auth.getUser();
+            currentUser = user;
+            if (!user) {
+                document.getElementById('adminCheck').style.display = 'block';
+                document.getElementById('adminCheck').innerHTML = '请先 <a href="login.html">登录</a>，且需要管理员权限。';
+                document.getElementById('loadingSpinner').style.display = 'none';
+                return false;
+            }
+            const { data: profile } = await supabaseClient
+                .from('profiles')
+                .select('role')
+                .eq('id', user.id)
+                .single();
+            if (profile?.role !== 'admin') {
+                document.getElementById('adminCheck').style.display = 'block';
+                document.getElementById('adminCheck').innerHTML = '你没有管理员权限。';
+                document.getElementById('loadingSpinner').style.display = 'none';
+                return false;
+            }
+            return true;
+        }
+
+        // 手动查询 pending 申请
+        async function loadPendingRequests() {
+            const { data: requests, error } = await supabaseClient
+                .from('doc_change_requests')
+                .select('*')
+                .eq('status', 'pending')
+                .order('created_at', { ascending: false });
+            if (error) {
+                console.error(error);
+                return [];
+            }
+            if (!requests || requests.length === 0) return [];
+
+            const docIds = [...new Set(requests.map(r => r.document_id))];
+            const userIds = [...new Set(requests.map(r => r.requester_id))];
+
+            const { data: docs } = await supabaseClient
+                .from('documents')
+                .select('id, title')
+                .in('id', docIds);
+            const docMap = Object.fromEntries((docs || []).map(d => [d.id, d.title]));
+
+            const { data: profiles } = await supabaseClient
+                .from('profiles')
+                .select('id, email')
+                .in('id', userIds);
+            const userMap = Object.fromEntries((profiles || []).map(p => [p.id, p.email]));
+
+            return requests.map(req => ({
+                ...req,
+                documents: { title: docMap[req.document_id] || '未知文档' },
+                profiles: { email: userMap[req.requester_id] || '未知用户' }
+            }));
+        }
+
+        // 渲染列表（使用 data 属性，不拼接 onclick 字符串）
+        async function renderRequests() {
+            const requests = await loadPendingRequests();
+            const container = document.getElementById('requestsContainer');
+            if (requests.length === 0) {
+                container.innerHTML = '<div class="alert alert-info">暂无待审批的修改申请。</div>';
+                return;
+            }
+
+            let html = '';
+            for (const req of requests) {
+                html += `
+                    <div class="request-card" data-request-id="${req.id}" data-doc-id="${req.document_id}" data-title="${escapeAttr(req.proposed_title || '')}" data-content="${escapeAttr(req.proposed_content || '')}">
+                        <div class="d-flex justify-content-between align-items-start flex-wrap">
+                            <div>
+                                <h5>📄 文档：${escapeHtml(req.documents.title)}</h5>
+                                <p class="text-muted small">申请人：${escapeHtml(req.profiles.email)} | 申请时间：${new Date(req.created_at).toLocaleString()}</p>
+                            </div>
+                            <div><span class="badge bg-warning text-dark">待审批</span></div>
+                        </div>
+                        ${req.proposed_title ? `<div><strong>建议新标题：</strong> ${escapeHtml(req.proposed_title)}</div>` : ''}
+                        ${req.proposed_content ? `
+                            <div class="mt-2">
+                                <strong>建议新内容 (Markdown)：</strong>
+                                <button class="btn btn-sm btn-link p-0 ms-2 preview-btn">预览</button>
+                                <div class="diff-view">${escapeHtml(req.proposed_content.substring(0, 300))}${req.proposed_content.length > 300 ? '…' : ''}</div>
+                            </div>
+                        ` : ''}
+                        <div class="mt-3">
+                            <button class="btn btn-sm btn-success me-2 approve-btn">✓ 批准</button>
+                            <button class="btn btn-sm btn-danger reject-btn">✗ 拒绝</button>
+                        </div>
+                    </div>
+                `;
+            }
+            container.innerHTML = html;
+
+            // 绑定按钮事件（事件委托）
+            container.querySelectorAll('.approve-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const card = btn.closest('.request-card');
+                    const requestId = card.dataset.requestId;
+                    const docId = card.dataset.docId;
+                    const newTitle = card.dataset.title || null;
+                    const newContent = card.dataset.content || null;
+                    await approveRequest(requestId, docId, newTitle, newContent);
+                });
+            });
+            container.querySelectorAll('.reject-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const card = btn.closest('.request-card');
+                    const requestId = card.dataset.requestId;
+                    await rejectRequest(requestId);
+                });
+            });
+            container.querySelectorAll('.preview-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const card = btn.closest('.request-card');
+                    const content = card.dataset.content;
+                    previewContent(content);
+                });
+            });
+        }
+
+        async function approveRequest(requestId, docId, newTitle, newContent) {
+            if (!confirm('批准后将更新文档内容，确定吗？')) return;
+            const updateData = {};
+            if (newTitle) updateData.title = newTitle;
+            if (newContent) updateData.content = newContent;
+            updateData.updated_at = new Date().toISOString();
+
+            const { error: updateError } = await supabaseClient
+                .from('documents')
+                .update(updateData)
+                .eq('id', docId);
+            if (updateError) {
+                alert('更新文档失败：' + updateError.message);
+                return;
+            }
+
+            const { error: statusError } = await supabaseClient
+                .from('doc_change_requests')
+                .update({ status: 'approved' })
+                .eq('id', requestId);
+            if (statusError) {
+                alert('更新申请状态失败：' + statusError.message);
+                return;
+            }
+
+            alert('已批准，文档已更新');
+            renderRequests();
+        }
+
+        async function rejectRequest(requestId) {
+            if (!confirm('拒绝后该申请将被标记为已拒绝，确定吗？')) return;
+            const { error } = await supabaseClient
+                .from('doc_change_requests')
+                .update({ status: 'rejected' })
+                .eq('id', requestId);
+            if (error) {
+                alert('操作失败：' + error.message);
+                return;
+            }
+            alert('已拒绝');
+            renderRequests();
+        }
+
+        function previewContent(content) {
+            if (!content) return;
+            document.getElementById('previewContent').innerHTML = marked.parse(content);
+            new bootstrap.Modal(document.getElementById('previewModal')).show();
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/[&<>]/g, function(m) {
+                if (m === '&') return '&amp;';
+                if (m === '<') return '&lt;';
+                if (m === '>') return '&gt;';
+                return m;
+            });
+        }
+
+        function escapeAttr(str) {
+            if (!str) return '';
+            // 转义双引号，以便安全放入 data-* 属性
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        // 初始化
+        (async function() {
+            const isAdmin = await checkAdmin();
+            if (!isAdmin) return;
+            document.getElementById('loadingSpinner').style.display = 'none';
+            document.getElementById('requestsContainer').style.display = 'block';
+            await renderRequests();
+        })();
+    </script>
+</body>
+</html>
